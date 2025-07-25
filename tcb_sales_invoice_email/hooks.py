@@ -43,7 +43,11 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+	"Sales Invoice": "public/js/sales_invoice.js",
+	"Sales Order": "public/js/sales_order.js",
+	"Delivery Note": "public/js/delivery_note.js"
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -148,23 +152,18 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"tcb_sales_invoice_email.tasks.all"
-# 	],
-# 	"daily": [
-# 		"tcb_sales_invoice_email.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"tcb_sales_invoice_email.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"tcb_sales_invoice_email.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"tcb_sales_invoice_email.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"cron": {
+		"0 0 * * *": [
+			# Runs at midnight (00:00)
+			"tcb_sales_invoice_email.tasks.send_delivery_emails"
+		],
+		"0 0 */4 * *": [
+			# Runs at midnight (00:00) every 4 days
+			"tcb_sales_invoice_email.tasks.send_overdue_invoice_emails"
+		]
+	}
+}
 
 # Testing
 # -------
@@ -242,3 +241,18 @@ app_license = "mit"
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
+
+fixtures = [
+    {
+        "dt": "Custom Field",
+        "filters": [
+            [
+                "module",
+                "in",
+                (
+                    "TCB Sales Invoice Email"
+                ),
+            ]
+        ],
+    }
+]
