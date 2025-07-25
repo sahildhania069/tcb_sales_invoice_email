@@ -274,7 +274,7 @@ def send_overdue_invoice_emails():
             "docstatus": 1,  # Submitted invoices
             "custom_send_due_invoice_email": 1,  # Send overdue invoice email flag is set
             "outstanding_amount": [">", 0],  # Has outstanding amount
-            "due_date": ["<", today()],  # Due date has passed
+            "custom_expected_payment_due_date": ["<", today()],  # Due date has passed
         },
         fields=[
             "name",
@@ -285,7 +285,7 @@ def send_overdue_invoice_emails():
             "rounded_total",
             "grand_total",
             "outstanding_amount",
-            "due_date",
+            "custom_expected_payment_due_date",
         ],
     )
 
@@ -302,7 +302,7 @@ def send_overdue_invoice_emails():
             }
 
         # Calculate days overdue
-        days_overdue = date_diff(today(), getdate(invoice.due_date))
+        days_overdue = date_diff(today(), getdate(invoice.custom_expected_payment_due_date))
 
         # Add invoice to customer's list
         customer_invoices[invoice.customer]["invoices"].append(
@@ -310,7 +310,7 @@ def send_overdue_invoice_emails():
                 "name": invoice.name,
                 "po_no": invoice.po_no or "",
                 "posting_date": invoice.posting_date,
-                "due_date": invoice.due_date,
+                "custom_expected_payment_due_date": invoice.custom_expected_payment_due_date,
                 "rounded_total": invoice.rounded_total,
                 "grand_total": invoice.grand_total,
                 "outstanding_amount": invoice.outstanding_amount,
@@ -461,7 +461,7 @@ def get_overdue_invoice_table(invoices):
             <td>{invoice['name']}</td>
             <td align="center">{invoice['posting_date']}</td>
             <td>{invoice['po_no']}</td>
-            <td align="center">{invoice['due_date']}</td>
+            <td align="center">{invoice['custom_expected_payment_due_date']}</td>
             <td align="right">{frappe.format(invoice['grand_total'], {'fieldtype': 'Currency'})}</td>
             <td align="right">{frappe.format(invoice['outstanding_amount'], {'fieldtype': 'Currency'})}</td>
             <td align="center">{invoice['days_overdue']} days</td>
