@@ -44,11 +44,17 @@ def process_invoice_email(invoice_name):
     Args:
         invoice_name: The name/ID of the Sales Invoice
     """
-    frappe.log_error(message=f"Starting process_invoice_email for {invoice_name}", title="Sales Invoice Email Process")
+    frappe.log_error(
+        message=f"Starting process_invoice_email for {invoice_name}",
+        title="Sales Invoice Email Process",
+    )
     doc = frappe.get_doc("Sales Invoice", invoice_name)
 
     # Skip if no email recipients defined
-    frappe.log_error(message=f"Checking email recipients for {invoice_name}", title="Sales Invoice Email Recipients")
+    frappe.log_error(
+        message=f"Checking email recipients for {invoice_name}",
+        title="Sales Invoice Email Recipients",
+    )
     if (
         not doc.get("custom_dispatch_email_to")
         or len(doc.custom_dispatch_email_to) == 0
@@ -60,7 +66,10 @@ def process_invoice_email(invoice_name):
 
     # Get email recipients by type (TO, CC, BCC)
     recipients = {"to": [], "cc": [], "bcc": []}
-    frappe.log_error(message=f"Processing email recipients for {invoice_name}", title="Sales Invoice Email Recipients")
+    frappe.log_error(
+        message=f"Processing email recipients for {invoice_name}",
+        title="Sales Invoice Email Recipients",
+    )
 
     for recipient in doc.custom_dispatch_email_to:
         if recipient.contact and recipient.send_as:
@@ -102,7 +111,10 @@ def process_invoice_email(invoice_name):
         # Try to get email template
         template_name = "Sales Invoice Delivery Notification"
         template_args = invoice_data
-        frappe.log_error(message=f"Getting email template '{template_name}' for {invoice_name}", title="Sales Invoice Email Template")
+        frappe.log_error(
+            message=f"Getting email template '{template_name}' for {invoice_name}",
+            title="Sales Invoice Email Template",
+        )
 
         try:
             email_content = get_email_template(template_name, template_args)
@@ -112,31 +124,75 @@ def process_invoice_email(invoice_name):
             message = get_default_email_content(invoice_data)
 
         # Send email
-        frappe.log_error(message=f"Preparing email sending for {invoice_name} with recipients: to={recipients['to']}, cc={recipients['cc']}, bcc={recipients['bcc']}", title="Sales Invoice Email Send")
-
-        # Get attachment first to avoid timeout in the middle of sending
-        frappe.log_error(message=f"Getting invoice attachment for {invoice_name}", title="Sales Invoice Email Attachment")
-        try:
-            attachment = get_invoice_attachment(doc)
-            frappe.log_error(message=f"Successfully got attachment for {invoice_name}, type: {attachment['fname'].split('.')[-1]}", title="Sales Invoice Email Attachment Success")
-        except Exception as attach_error:
-            frappe.log_error(message=f"Error getting attachment for {invoice_name}: {attach_error!s}\n\nTraceback: {frappe.get_traceback()}", title="Sales Invoice Email Attachment Error")
-            raise
-
-        # Now send with the prepared attachment
-        frappe.log_error(message=f"Sending email for {invoice_name}", title="Sales Invoice Email Send")
-        frappe.sendmail(
-            recipients=recipients["to"],
-            cc=recipients["cc"] if recipients["cc"] else None,
-            bcc=recipients["bcc"] if recipients["bcc"] else None,
-            subject=subject,
-            message=message,
-            attachments=[attachment],
-            reference_doctype="Sales Invoice",
-            reference_name=doc.name,
+        frappe.log_error(
+            message=f"Preparing email sending for {invoice_name} with recipients: to={recipients['to']}, cc={recipients['cc']}, bcc={recipients['bcc']}",
+            title="Sales Invoice Email Send",
         )
 
-        frappe.log_error(message=f"Email sent successfully for {invoice_name}, updating status", title="Sales Invoice Email Success")
+        # Attachment will be handled during email sending
+
+        # Send email with PDF attachment using Communication.make
+        try:
+            from frappe.core.doctype.communication.email import make
+
+            frappe.log_error(
+                message=f"Using Communication.make to send email for {invoice_name} with PDF attachment",
+                title="Sales Invoice Email - Using Communication.make",
+            )
+
+            # This will both generate the PDF using the specified print format
+            # and send it as an attachment in a single call
+            # Get default outgoing email account
+            from frappe.email.doctype.email_account.email_account import EmailAccount
+
+            # Find the default outgoing email account
+            email_account_dict = EmailAccount.find_outgoing()
+            email_account = email_account_dict.get("default") if email_account_dict else None
+
+            make(
+                doctype=doc.doctype,
+                name=doc.name,
+                content=message,
+                subject=subject,
+                sent_or_received="Sent",
+                sender=(
+                    email_account.email_id if email_account else None
+                ),  # Use system default outgoing email
+                sender_full_name=(
+                    email_account.name if email_account else None
+                ),  # Use account name
+                recipients=recipients["to"],
+                communication_medium="Email",
+                send_email=1,
+                print_html=None,
+                print_format="Felix Sales Invoice",  # Use the specific print format
+                attachments=None,  # No additional attachments needed
+                send_me_a_copy=False,
+                cc=recipients["cc"] if recipients["cc"] else None,
+                bcc=recipients["bcc"] if recipients["bcc"] else None,
+                read_receipt=None,
+                print_letterhead=True,
+                email_template=None,
+                communication_type=None,
+                send_after=None,
+                now=True,  # Send immediately
+            )
+
+            frappe.log_error(
+                message=f"Email with PDF sent successfully for {invoice_name} using Communication.make",
+                title="Sales Invoice Email Send Success",
+            )
+        except Exception as e:
+            frappe.log_error(
+                message=f"Failed to send email with PDF for {invoice_name}: {str(e)}\n\nTraceback: {frappe.get_traceback()}",
+                title="Sales Invoice Email Send Error",
+            )
+            raise  # Re-raise to ensure proper error handling
+
+        frappe.log_error(
+            message=f"Email sent successfully for {invoice_name}, updating status",
+            title="Sales Invoice Email Success",
+        )
 
         # Update invoice status using db.set_value since document is submitted
         frappe.db.set_value(
@@ -147,12 +203,18 @@ def process_invoice_email(invoice_name):
             update_modified=False,
         )
 
-        frappe.log_error(message=f"Status updated for {invoice_name}, committing transaction", title="Sales Invoice Email DB Update")
+        frappe.log_error(
+            message=f"Status updated for {invoice_name}, committing transaction",
+            title="Sales Invoice Email DB Update",
+        )
         frappe.db.commit()
         frappe.logger().info(f"Delivery email sent successfully for {invoice_name}")
     except Exception as e:
         frappe.db.rollback()
-        frappe.log_error(message=f"FAILED process_invoice_email for {invoice_name}: {e!s}\n\nTraceback: {frappe.get_traceback()}", title="Sales Invoice Email Error")
+        frappe.log_error(
+            message=f"FAILED process_invoice_email for {invoice_name}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
+            title="Sales Invoice Email Error",
+        )
         frappe.logger().error(
             f"Failed to send delivery email for {invoice_name}: {e!s}"
         )
@@ -160,76 +222,71 @@ def process_invoice_email(invoice_name):
 
 
 def get_invoice_attachment(doc):
+    frappe.log_error(
+        message=f"Starting attachment process for invoice {doc.name}",
+        title="Sales Invoice Email Attachment Start",
+    )
+
+    # First, check if this invoice already has an attachment we can use directly
     try:
-        frappe.log_error(message=f"Starting PDF generation for invoice {doc.name}", title="Sales Invoice Email PDF Start")
-        # First, check if this invoice already has an attachment we can use
+        # Look for existing PDF attachments
         attachments = frappe.get_all(
             "File",
             filters={
                 "attached_to_doctype": "Sales Invoice",
                 "attached_to_name": doc.name,
-                "file_name": f"{doc.name}.pdf"
+                "file_name": ["like", "%.pdf"],
             },
-            fields=["name", "file_url", "file_name"]
+            fields=["name", "file_url", "file_name"],
+            order_by="creation desc",  # Get the most recent first
         )
 
-        # If we already have a generated PDF attachment, use it
         if attachments:
-            frappe.log_error(message=f"Found existing attachment for {doc.name}: {attachments[0].name}", title="Sales Invoice Email PDF Cache")
+            # Found an existing attachment, use it
+            frappe.log_error(
+                message=f"Found existing PDF attachment for {doc.name}: {attachments[0].name}",
+                title="Sales Invoice Email Attachment Found",
+            )
+
             file_doc = frappe.get_doc("File", attachments[0].name)
-            return {
-                "fname": file_doc.file_name,
-                "fcontent": file_doc.get_content(),
-                "content_type": "application/pdf"
-            }
+            file_content = file_doc.get_content()
 
-        # Otherwise generate a new one with optimized options
-        frappe.log_error(message=f"No existing attachment for {doc.name}, generating new PDF", title="Sales Invoice Email PDF Gen")
-        html = frappe.get_print("Sales Invoice", doc.name, print_format="Standard")
-        pdf_options = {
-            "margin-top": "15mm",
-            "margin-right": "15mm",
-            "margin-bottom": "15mm",
-            "margin-left": "15mm",
-            "page-size": "A4",
-            "encoding": "UTF-8",
-            "disable-smart-shrinking": "",
-            "lowquality": "",  # Lower quality, faster rendering
-            "quiet": "",
-        }
+            if file_content:
+                return {"fname": file_doc.file_name, "fcontent": file_content}
 
-        # Generate PDF with optimized options
-        frappe.log_error(message=f"Starting PDF rendering for {doc.name} with options: {pdf_options}", title="Sales Invoice Email PDF Options")
-        pdf_data = frappe.utils.pdf.get_pdf(html, options=pdf_options)
-        frappe.log_error(message=f"PDF generation completed for {doc.name}, size: {len(pdf_data)} bytes", title="Sales Invoice Email PDF Success")
+        # No usable existing attachment, create a simple text attachment with invoice details and link
+        frappe.log_error(
+            message=f"Creating text attachment with invoice details for {doc.name}",
+            title="Sales Invoice Email Text Fallback",
+        )
 
-        # Save attachment for future use to avoid regeneration
-        _file = frappe.get_doc({
-            "doctype": "File",
-            "file_name": f"{doc.name}.pdf",
-            "attached_to_doctype": "Sales Invoice",
-            "attached_to_name": doc.name,
-            "content": pdf_data,
-            "is_private": 1
-        })
-        _file.save(ignore_permissions=True)
-        frappe.log_error(message=f"Saved PDF attachment for {doc.name}, file ID: {_file.name}", title="Sales Invoice Email PDF Save")
+        # Create a detailed text file with invoice information
+        content = f"""INVOICE DETAILS: {doc.name}
 
-        return {
-            "fname": f"{doc.name}.pdf",
-            "fcontent": pdf_data,
-            "content_type": "application/pdf"
-        }
+Date: {doc.posting_date}
+Customer: {doc.customer_name}
+Grand Total: {doc.get_formatted('grand_total')}
+
+"""
+
+        # Add line items
+        content += "Items:\n"
+        for idx, item in enumerate(doc.items, 1):
+            content += f"{idx}. {item.item_name} - {item.qty} {item.uom} @ {item.get_formatted('rate')} = {item.get_formatted('amount')}\n"
+
+        content += f"\nTotal: {doc.get_formatted('grand_total')}\n"
+        content += f"\nView invoice online at: {frappe.utils.get_url()}/app/sales-invoice/{doc.name}\n"
+
+        return {"fname": f"{doc.name}.txt", "fcontent": content}
+
     except Exception as e:
-        frappe.log_error(message=f"Failed to generate PDF for {doc.name}: {str(e)!s}\n\nTraceback: {frappe.get_traceback()}", title="Sales Invoice Email PDF Error")
-        # Fall back to a URL link if PDF generation fails
-        content = f"Sales Invoice: {doc.name}\nCustomer: {doc.customer_name}\nDate: {doc.posting_date}\n"
-        content += f"Please view the invoice at: {frappe.utils.get_url()}/app/sales-invoice/{doc.name}"
-
-        return {
-            "fname": f"{doc.name}.txt",
-            "fcontent": content
-        }
+        frappe.log_error(
+            message=f"Failed to get attachment for {doc.name}: {str(e)}\n\nTraceback: {frappe.get_traceback()}",
+            title="Sales Invoice Email Attachment Error",
+        )
+        # Create a minimal fallback attachment with just the invoice link
+        content = f"Invoice: {doc.name}\nView at: {frappe.utils.get_url()}/app/sales-invoice/{doc.name}"
+        return {"fname": f"{doc.name}.txt", "fcontent": content}
 
 
 def get_default_email_content(invoice_data):
@@ -265,7 +322,10 @@ def send_overdue_invoice_emails():
     Runs every 4 days to check for invoices that are overdue and need reminder emails sent.
     """
     frappe.logger().info("Starting overdue invoice email process")
-    frappe.log_error(message="Starting overdue invoice email process", title="Sales Invoice Email Overdue Process")
+    frappe.log_error(
+        message="Starting overdue invoice email process",
+        title="Sales Invoice Email Overdue Process",
+    )
 
     # Find qualifying invoices that are overdue
     invoices = frappe.get_all(
@@ -290,7 +350,10 @@ def send_overdue_invoice_emails():
     )
 
     frappe.logger().info(f"Found {len(invoices)} overdue invoices for email processing")
-    frappe.log_error(message=f"Found {len(invoices)} overdue invoices for email processing", title="Sales Invoice Email Overdue Process")
+    frappe.log_error(
+        message=f"Found {len(invoices)} overdue invoices for email processing",
+        title="Sales Invoice Email Overdue Process",
+    )
 
     # Group invoices by customer
     customer_invoices = {}
@@ -326,7 +389,10 @@ def send_overdue_invoice_emails():
             frappe.logger().error(
                 f"Error processing overdue invoices for customer {customer}: {e!s}"
             )
-            frappe.log_error(message=f"Error processing overdue invoices for customer {customer}: {e!s}\n\nTraceback: {frappe.get_traceback()}", title="Sales Invoice Email Overdue Process Error")
+            frappe.log_error(
+                message=f"Error processing overdue invoices for customer {customer}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
+                title="Sales Invoice Email Overdue Process Error",
+            )
             continue
 
 
@@ -351,7 +417,10 @@ def process_overdue_invoice_email(customer_id, customer_data):
 
     # If no recipients are defined, log and skip
     if not email_recipients or len(email_recipients) == 0:
-        frappe.log_error(message=f"No email recipients defined for customer {customer_id}, skipping", title="Sales Invoice Email Overdue Process")
+        frappe.log_error(
+            message=f"No email recipients defined for customer {customer_id}, skipping",
+            title="Sales Invoice Email Overdue Process",
+        )
         return
 
     # Collect email addresses from contacts
@@ -368,7 +437,10 @@ def process_overdue_invoice_email(customer_id, customer_data):
 
     # Check if we have any recipients
     if not recipients["to"]:
-        frappe.log_error(message=f"No 'TO' recipients found for customer {customer_id}, skipping", title="Sales Invoice Email Overdue Process")
+        frappe.log_error(
+            message=f"No 'TO' recipients found for customer {customer_id}, skipping",
+            title="Sales Invoice Email Overdue Process",
+        )
         return
 
     try:
@@ -419,11 +491,17 @@ def process_overdue_invoice_email(customer_id, customer_data):
         #     )
 
         frappe.db.commit()
-        frappe.log_error(message=f"Overdue invoice email sent successfully for {customer_id}", title="Sales Invoice Email Overdue Process")
+        frappe.log_error(
+            message=f"Overdue invoice email sent successfully for {customer_id}",
+            title="Sales Invoice Email Overdue Process",
+        )
 
     except Exception as e:
         frappe.db.rollback()
-        frappe.log_error(message=f"Failed to send overdue invoice email for {customer_id}: {e!s}\n\nTraceback: {frappe.get_traceback()}", title="Sales Invoice Email Overdue Process Error")
+        frappe.log_error(
+            message=f"Failed to send overdue invoice email for {customer_id}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
+            title="Sales Invoice Email Overdue Process Error",
+        )
         raise
 
 
