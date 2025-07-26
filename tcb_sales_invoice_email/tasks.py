@@ -147,7 +147,9 @@ def process_invoice_email(invoice_name):
 
             # Find the default outgoing email account
             email_account_dict = EmailAccount.find_outgoing()
-            email_account = email_account_dict.get("default") if email_account_dict else None
+            email_account = (
+                email_account_dict.get("default") if email_account_dict else None
+            )
 
             make(
                 doctype=doc.doctype,
@@ -209,6 +211,10 @@ def process_invoice_email(invoice_name):
         )
         frappe.db.commit()
         frappe.logger().info(f"Delivery email sent successfully for {invoice_name}")
+        frappe.log_error(
+            message=f"Delivery email sent successfully for {invoice_name}",
+            title="Sales Invoice Email Success",
+        )
     except Exception as e:
         frappe.db.rollback()
         frappe.log_error(
@@ -324,17 +330,19 @@ def send_overdue_invoice_emails():
     frappe.logger().info("Starting overdue invoice email process")
     frappe.log_error(
         message="Starting overdue invoice email process",
-        title="Sales Invoice Email Overdue Process",
+        title="Sales Invoice Email Overdue Process START",
     )
 
     # Find qualifying invoices that are overdue
-    invoices = frappe.get_all(
+    current_date = today()
+    overdue_invoices = frappe.get_all(
         "Sales Invoice",
         filters={
-            "docstatus": 1,  # Submitted invoices
-            "custom_send_due_invoice_email": 1,  # Send overdue invoice email flag is set
+            "docstatus": 1,
+            "custom_send_due_invoice_email":1,
             "outstanding_amount": [">", 0],  # Has outstanding amount
-            "custom_expected_payment_due_date": ["<", today()],  # Due date has passed
+            "custom_expected_payment_due_date": ["<", current_date],  # Past due date
+            "status": ["not in", ["Paid", "Closed", "Cancelled"]],
         },
         fields=[
             "name",
@@ -342,167 +350,304 @@ def send_overdue_invoice_emails():
             "customer_name",
             "po_no",
             "posting_date",
+            "custom_expected_payment_due_date",
             "rounded_total",
             "grand_total",
             "outstanding_amount",
-            "custom_expected_payment_due_date",
         ],
     )
 
-    frappe.logger().info(f"Found {len(invoices)} overdue invoices for email processing")
+    # Debug: Print raw SQL query for manual verification
+    last_query = frappe.db.last_query
     frappe.log_error(
-        message=f"Found {len(invoices)} overdue invoices for email processing",
+        message=f"SQL Query for overdue invoices:\n{last_query}",
+        title="Overdue Invoice Query",
+    )
+
+    if not overdue_invoices:
+        frappe.logger().info("No overdue invoices found")
+        frappe.log_error(
+            message="No overdue invoices found",
+            title="Sales Invoice Email Overdue Process",
+        )
+        return
+
+    frappe.log_error(
+        message=f"Found {len(overdue_invoices)} overdue invoices",
         title="Sales Invoice Email Overdue Process",
     )
 
-    # Group invoices by customer
-    customer_invoices = {}
-    for invoice in invoices:
-        if invoice.customer not in customer_invoices:
-            customer_invoices[invoice.customer] = {
-                "name": invoice.customer_name,
-                "invoices": [],
-            }
+    # Create a contact-based structure instead of customer-based
+    # This way each contact only gets invoices they're associated with
+    contact_invoices = {}
 
-        # Calculate days overdue
-        days_overdue = date_diff(today(), getdate(invoice.custom_expected_payment_due_date))
-
-        # Add invoice to customer's list
-        customer_invoices[invoice.customer]["invoices"].append(
-            {
-                "name": invoice.name,
-                "po_no": invoice.po_no or "",
-                "posting_date": invoice.posting_date,
-                "custom_expected_payment_due_date": invoice.custom_expected_payment_due_date,
-                "rounded_total": invoice.rounded_total,
-                "grand_total": invoice.grand_total,
-                "outstanding_amount": invoice.outstanding_amount,
-                "days_overdue": days_overdue,
-            }
+    if not overdue_invoices:
+        frappe.log_error(
+            message="No overdue invoices found in query result",
+            title="Sales Invoice Email Overdue Process Empty",
         )
 
-    # Process each customer's invoices
-    for customer, data in customer_invoices.items():
+    for invoice in overdue_invoices:
+        # Log each invoice we're processing
+        frappe.log_error(
+            message=f"Processing invoice {invoice.name} for customer {invoice.customer_name}",
+            title="Processing Individual Invoice",
+        )
+
+        # Calculate days overdue
+        days_overdue = date_diff(current_date, getdate(invoice.custom_expected_payment_due_date))
+
+        # Get all contacts for this invoice
         try:
-            process_overdue_invoice_email(customer, data)
-        except Exception as e:
-            frappe.logger().error(
-                f"Error processing overdue invoices for customer {customer}: {e!s}"
+            dispatch_emails = frappe.get_all(
+                "Overdue Mail Detail",
+                filters={"parent": invoice.name},
+                fields=["contact", "send_as"],
+            )
+
+            # Log what we found
+            frappe.log_error(
+                message=f"Found {len(dispatch_emails)} contacts for invoice {invoice.name}",
+                title="Invoice Contacts",
+            )
+        except Exception as dispatch_error:
+            frappe.log_error(
+                message=f"Error getting dispatch emails for invoice {invoice.name}: {str(dispatch_error)}\n\nTraceback: {frappe.get_traceback()}",
+                title="Dispatch Email Query Error",
+            )
+            dispatch_emails = []
+
+        if not dispatch_emails:
+            frappe.logger().info(
+                f"No contacts found for invoice {invoice.name}, skipping"
             )
             frappe.log_error(
-                message=f"Error processing overdue invoices for customer {customer}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
+                message=f"No contacts found for invoice {invoice.name}, skipping this invoice",
+                title="Missing Contacts for Invoice",
+            )
+            continue
+
+        # Create invoice data to store
+        invoice_data = {
+            "name": invoice.name,
+            "po_no": invoice.po_no or "",
+            "posting_date": invoice.posting_date,
+            "custom_expected_payment_due_date": invoice.custom_expected_payment_due_date,
+            "rounded_total": invoice.rounded_total,
+            "grand_total": invoice.grand_total,
+            "outstanding_amount": invoice.outstanding_amount,
+            "days_overdue": days_overdue,
+            "customer": invoice.customer,
+            "customer_name": invoice.customer_name,
+        }
+
+        # Add this invoice to each contact's list
+        frappe.log_error(
+            message=f"Starting to process {len(dispatch_emails)} contacts for invoice {invoice.name}",
+            title="Processing Invoice Contacts",
+        )
+
+        for dispatch in dispatch_emails:
+            # Log each dispatch processing
+            frappe.log_error(
+                message=f"Processing dispatch entry for invoice {invoice.name}: {dispatch.name if hasattr(dispatch, 'name') else 'No Name'}",
+                title="Processing Dispatch Entry",
+            )
+
+            if not dispatch.contact:
+                frappe.log_error(
+                    message=f"Dispatch entry for invoice {invoice.name} has no contact, skipping",
+                    title="Missing Contact in Dispatch",
+                )
+                continue
+
+            contact_id = dispatch.contact
+
+            # Log the contact we're processing
+            frappe.log_error(
+                message=f"Adding invoice {invoice.name} to contact {contact_id}",
+                title="Adding Invoice To Contact",
+            )
+
+            # Initialize contact entry if it doesn't exist
+            if contact_id not in contact_invoices:
+                contact_invoices[contact_id] = {
+                    "send_as": (
+                        dispatch.send_as if hasattr(dispatch, "send_as") else "to"
+                    ),
+                    "invoices": [],
+                    # We'll get email and other details later
+                }
+                frappe.log_error(
+                    message=f"Created new contact entry for contact {contact_id}",
+                    title="New Contact Entry",
+                )
+
+            # Add this invoice to the contact's list
+            contact_invoices[contact_id]["invoices"].append(invoice_data)
+
+    frappe.log_error(
+        message=f"Found {len(contact_invoices)} contacts with overdue invoices",
+        title="Sales Invoice Email Overdue Process",
+    )
+    # Detailed log of the final contact_invoices structure
+    for contact_id, data in contact_invoices.items():
+        invoice_list = ", ".join([inv["name"] for inv in data["invoices"]])
+        frappe.log_error(
+            message=f"Contact {contact_id} has {len(data['invoices'])} invoices: {invoice_list}",
+            title="Contact Invoice Summary",
+        )
+
+    # Process each contact's invoices
+    for contact_id, data in contact_invoices.items():
+        frappe.log_error(
+            message=f"Starting to process contact {contact_id} with {len(data['invoices'])} invoices",
+            title="Processing Contact Invoices",
+        )
+        try:
+            process_contact_overdue_invoice_email(contact_id, data)
+        except Exception as e:
+            frappe.logger().error(
+                f"Error processing overdue invoices for contact {contact_id}: {e!s}"
+            )
+            frappe.log_error(
+                message=f"Error processing overdue invoices for contact {contact_id}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
                 title="Sales Invoice Email Overdue Process Error",
             )
             continue
 
 
-def process_overdue_invoice_email(customer_id, customer_data):
-    """
-    Process email sending for a customer's overdue invoices.
-
-    Args:
-        customer_id: The customer ID
-        customer_data: Dict containing customer name and list of overdue invoices
-    """
-    # Fetch the first invoice to get email recipients
-    first_invoice_name = customer_data["invoices"][0]["name"]
-
-    # Try to get email recipients from the custom overdue_invoice_email_to child table
-    recipients = {"to": [], "cc": [], "bcc": []}
-    email_recipients = frappe.get_all(
-        "Overdue Mail Detail",
-        filters={"parent": first_invoice_name},
-        fields=["contact", "send_as"],
+def process_contact_overdue_invoice_email(contact_id, contact_data):
+    """Process overdue invoice email for a specific contact - only sending invoices relevant to this contact"""
+    frappe.logger().info(f"Processing overdue invoices for contact {contact_id}")
+    frappe.log_error(
+        message=f"Processing overdue invoices for contact {contact_id}",
+        title="Sales Invoice Email Overdue Process",
     )
 
-    # If no recipients are defined, log and skip
-    if not email_recipients or len(email_recipients) == 0:
-        frappe.log_error(
-            message=f"No email recipients defined for customer {customer_id}, skipping",
-            title="Sales Invoice Email Overdue Process",
-        )
-        return
-
-    # Collect email addresses from contacts
-    for recipient in email_recipients:
-        if recipient.contact and recipient.send_as:
-            contact_data = frappe.db.get_value(
-                "Contact", recipient.contact, "email_id", as_dict=1
-            )
-
-            if contact_data and contact_data.email_id:
-                send_as = recipient.send_as.lower()
-                if send_as in recipients:
-                    recipients[send_as].append(contact_data.email_id)
-
-    # Check if we have any recipients
-    if not recipients["to"]:
-        frappe.log_error(
-            message=f"No 'TO' recipients found for customer {customer_id}, skipping",
-            title="Sales Invoice Email Overdue Process",
-        )
-        return
-
     try:
-        # Prepare email content
-        subject = f"Outstanding Invoice Reminder - {customer_data['name']}"
+        # Get contact email
+        contact_email = frappe.db.get_value("Contact", contact_id, "email_id")
+        if not contact_email:
+            frappe.logger().info(f"No email found for contact {contact_id}, skipping")
+            frappe.log_error(
+                message=f"No email found for contact {contact_id}",
+                title="Sales Invoice Email Overdue Process Error",
+            )
+            return
 
-        # Generate HTML table for invoices
-        invoice_table = get_overdue_invoice_table(customer_data["invoices"])
+        # Get customer name from the first invoice
+        if not contact_data["invoices"]:
+            frappe.logger().info(f"No invoices for contact {contact_id}, skipping")
+            frappe.log_error(
+                message=f"No invoices found for contact {contact_id}",
+                title="Sales Invoice Email Overdue Process Error",
+            )
+            return
+
+        customer_name = contact_data["invoices"][0]["customer_name"]
+
+        # Set up recipients based on the contact's send_as setting
+        recipients = {"to": [], "cc": [], "bcc": []}
+        send_as = contact_data["send_as"].lower() if contact_data["send_as"] else "to"
+        if send_as in recipients:
+            recipients[send_as].append(contact_email)
+        else:
+            # Default to TO if send_as is invalid
+            recipients["to"].append(contact_email)
+
+      
+        # Build invoice table for only this contact's invoices
+        invoice_table = get_overdue_invoice_table(contact_data["invoices"])
+
+        # Calculate total outstanding for this contact's invoices
+        total_outstanding = sum(
+            inv["outstanding_amount"] for inv in contact_data["invoices"]
+        )
 
         # Try to get email template
         template_name = "Overdue Invoice Reminder"
         template_args = {
-            "customer_name": customer_data["name"],
+            "customer_name": customer_name,
             "invoice_table": invoice_table,
-            "total_outstanding": sum(
-                inv["outstanding_amount"] for inv in customer_data["invoices"]
-            ),
+            "total_outstanding": total_outstanding,
         }
 
         try:
-            email_content = get_email_template(template_name, template_args)
-            message = email_content.message
+            message = frappe.get_template(template_name).render(template_args)
         except Exception:
             # Fallback to default overdue invoice email content
-            message = get_default_overdue_email_content(
-                customer_data["name"], invoice_table
-            )
+            message = get_default_overdue_email_content(customer_name, invoice_table)
 
         # Send email
-        frappe.sendmail(
-            recipients=recipients["to"],
-            cc=recipients["cc"] if recipients["cc"] else None,
-            bcc=recipients["bcc"] if recipients["bcc"] else None,
-            subject=subject,
-            message=message,
-            reference_doctype="Sales Invoice",
-            reference_name=first_invoice_name,
+        subject = "Payment Reminder - Overdue Invoices"
+
+        # Get default outgoing email account
+        from frappe.email.doctype.email_account.email_account import EmailAccount
+
+        email_account_dict = EmailAccount.find_outgoing()
+        email_account = (
+            email_account_dict.get("default") if email_account_dict else None
         )
 
-        # Update status for all invoices
-        # for invoice in customer_data["invoices"]:
-        #     frappe.db.set_value(
-        #         "Sales Invoice",
-        #         invoice["name"],
-        #         "custom_overdue_mail_sent",  # Assuming this field exists or needs to be created
-        #         1,
-        #         update_modified=False,
-        #     )
-
-        frappe.db.commit()
+        # Log the email we're about to send for debugging
         frappe.log_error(
-            message=f"Overdue invoice email sent successfully for {customer_id}",
-            title="Sales Invoice Email Overdue Process",
+            message=f"Preparing to send email to {contact_email} with {len(contact_data['invoices'])} invoices\n"
+            f"Subject: {subject}\n"
+            f"Recipients: {recipients['to']}",
+            title="Email Sending Preparation",
         )
 
+        try:
+            # Send email with this contact's invoices
+            # Send immediately with now=True
+            frappe.sendmail(
+                recipients=recipients["to"],
+                subject=subject,
+                message=message,
+                sender=email_account.email_id if email_account else None,
+                cc=recipients["cc"] if recipients["cc"] else None,
+                bcc=recipients["bcc"] if recipients["bcc"] else None,
+                reference_doctype="Contact",
+                reference_name=contact_id,
+            )
+
+            # Log successful email sending
+            frappe.log_error(
+                message=f"Successfully sent email to {contact_email}",
+                title="Email Sent Successfully",
+            )
+        except Exception as email_error:
+            # Catch and log any errors during email sending
+            frappe.log_error(
+                message=f"Error sending email to {contact_email}: {str(email_error)}\n\nTraceback: {frappe.get_traceback()}",
+                title="Email Sending Error",
+            )
+
+        # Add additional logging
+        frappe.log_error(
+            message=f"Completed overdue email process for contact {contact_id}. Committing transaction.",
+            title="Overdue Invoice Email Process Complete",
+        )
+
+        # Ensure we commit the transaction
+        frappe.db.commit()
     except Exception as e:
         frappe.db.rollback()
         frappe.log_error(
-            message=f"Failed to send overdue invoice email for {customer_id}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
+            message=f"Failed to send overdue invoice email to contact {contact_id}: {e!s}\n\nTraceback: {frappe.get_traceback()}",
             title="Sales Invoice Email Overdue Process Error",
         )
         raise
+
+
+def process_overdue_invoice_email(customer_id, customer_data):
+    """Legacy function kept for backward compatibility"""
+    frappe.logger().info(
+        f"Legacy process_overdue_invoice_email called for {customer_id} - using new contact-based method"
+    )
+    # This function is now deprecated, but kept for backward compatibility
+    # The actual processing is now done by process_contact_overdue_invoice_email
 
 
 def get_overdue_invoice_table(invoices):
